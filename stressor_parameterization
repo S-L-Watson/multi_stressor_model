@@ -1,0 +1,1243 @@
+#----FISHING & Sedimentation Stressor response parameterization - raster correlative stressor manipulation model
+#----- Stephanie L Watson -- JAN 2024 ----
+
+# For publication purposes
+# Please cite author
+
+require(raster); require(dplyr); require(ggplot2);library(tidyverse);require(tools); require(plotly)
+
+# Variable Naming Key
+# .S = Sedimentation only altered density 
+# .F = Fishing only altered density 
+# .FS = Fishing & Sedimentation altered density 
+# .OG = Original / Baseline density 
+# .FSR = Fishing & Sediment impacted, with fishing recovered density 
+
+
+#### The first sections of this code goes through stressor impact individually. For the combined multiples stressor 
+#     code, - jump to Line #569 "FISHING & SED WITH RECOVERY SECTION"
+
+# ---- FISHING IMPACT ONLY SECTION #----
+# LOAD DATA----
+# 1 Load data---- 
+# This will include successive years of separate fishing stress (i.e 2010, 2011 etc..)
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Vars")
+f250m <- list.files(getwd())
+
+imp.var <-c("X","Y","FID",c(f250m))
+ras250m <- lapply(f250m, raster)
+plot(ras250m[[1]]) # check through layers make sure same extent and projection
+env250m_rs <- raster::stack(ras250m) #
+
+###-- CREATE TGB SPDF: Turn origonal raster stack and spatial points data into a dataframe 
+env250m_spdf <- rasterToPoints(env250m_rs, spatial = T) 
+env250m_df <- data.frame(env250m_spdf@data, X =env250m_spdf@coords[,1],Y = env250m_spdf@coords[,2])
+head(env250m_df)
+
+# ####---SET UNIQUE FID, EXTRACT X & Y( row and column numbers, not lat and long) data from raster stack ##
+env250m_spdf@coords 
+env250m_df$FID <- cellFromXY(env250m_rs, env250m_df[,c("X", "Y")])
+env250m_df <- env250m_df[,c(7:8,1:6,9)] # re-shuffle the order of columns, to put x and y at front
+
+# # # # # REMOVE ALL NA's from FISHING LAYER --
+# library(tidyverse)
+env250m_df <- env250m_df
+env250m_df<- env250m_df %>%
+  mutate(Fishing.trawl.2009 = if_else(is.na(Fishing.trawl.2009), 0, Fishing.trawl.2009),
+         Fishing.trawl.2010 = if_else(is.na(Fishing.trawl.2010), 0, Fishing.trawl.2010),
+         Fishing.trawl.2011 = if_else(is.na(Fishing.trawl.2011), 0, Fishing.trawl.2011),
+         Fishing.trawl.2012 = if_else(is.na(Fishing.trawl.2012), 0, Fishing.trawl.2012)) 
+
+# Remove NA's from other datasets
+env250m_df <- na.omit(env250m_df)
+imp.vars <- env250m_df
+imp.vars <- imp.vars %>% mutate_at (3:8, round, 2)
+# Add new column for modified density 
+imp.vars$New_Den <- 0
+colnames(imp.vars) <- c("X", "Y", "Den.OG", "Fishing_2009","Fishing_2010","Fishing_2011","Fishing_2012", "Mud.OG", "FID", "New_Den")
+
+## LOAD STRESS CURVE ----
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_curves")
+stress.1 <- as.data.frame(read.csv(file = "Fishing_c1_yr1.csv", header = T, sep = ",")) # stressor response curve
+
+#  YEAR 1 - FISHING IMPACT ----
+temp <- imp.vars
+# i = 1
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2009 >= stress.1[i, 1] & temp$Fishing_2009 < stress.1[i+1 ,1] ,"New_Den"] <- temp[temp$Fishing_2009 >= stress.1[i, 1] & temp$Fishing_2009 < stress.1[i+1 ,1]
+                                                                                                           ,"Den.OG"] * stress.1$abu[i]
+}
+# bring values back to same scale as input
+temp$New_Den <- temp$New_Den / 100
+temp$New_Den <- round(temp$New_Den, digits = 2)
+
+# Inspect visually / create raster 
+F_2009 <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                   y = imp.vars[,2],
+                                   z = temp[, "New_Den"]),
+                        crs = crs("+init=epsg:9191"))
+
+plot(ras250m[[1]]) # original unstressed 
+plot(F_2009)
+plot(F_2009 - ras250m[[1]])
+
+# Provide new name to year 1 
+temp$temp.Den.F.09 <- temp$New_Den
+
+#  YEAR 2 - FISHING IMPACT ----
+temp$New_Den <- 0
+# Year 2 Fishing impact @1% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2010 >= stress.1[i, 1] & temp$Fishing_2010 < stress.1[i+1 ,1] ,"New_Den"] <- temp[temp$Fishing_2010 >= stress.1[i, 1] & temp$Fishing_2010 < stress.1[i+1 ,1]
+                                                                                                              ,"temp.Den.F.09"] * stress.1$abu[i]
+}
+# bring values back to same scale as input
+temp$New_Den <- round(temp$New_Den / 100, digits = 2)
+
+
+# APPLY YR 2 RECOVERY (Fishing Only)----
+
+#(A) Calculate the difference in density from fishing impact (T1 - T0)
+temp$fish.diff <- temp$New_Den - temp$temp.Den.F.09
+# (B) Calculate the difference in fishing impact as a proportion (reduced trawling impact)
+temp$trawl.diff.prop <- round(temp$Fishing_2009 / temp$Fishing_2010, digits = 2)
+# tidy -Remove NAs and Infs
+temp$trawl.diff.prop[is.na(temp$trawl.diff.prop)] <- 0
+temp$trawl.diff.prop[is.infinite(temp$trawl.diff)] <- 0
+# (C) Calculate the proportion of reduced trawling impact of density in trawl difference
+# where values are (-) there is a decrease in fishing, hence recovery potential
+temp$temp.Den.prop.rec <- (temp$fish.diff - (temp$fish.diff * temp$trawl.diff.prop))/3
+# (D) Add the modified recovery density back to the previous year 
+temp$temp.Den.FR.10 <-  round(temp$temp.Den.prop.rec + temp$New_Den, digits = 2)
+# (E) Adjust for inflated values by impact
+temp <- transform(temp, temp.Den.FR.10 = ifelse(temp$temp.Den.FR.10 > temp$temp.Den.F.09, temp$temp.Den.F.09, temp$temp.Den.FR.10))
+
+# Inspect visually / create raster 
+F_2010 <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                   y = imp.vars[,2],
+                                   z = temp[, "temp.Den.FR.10"]),
+                        crs = crs("+init=epsg:9191"))
+
+plot(F_2010)
+plot(F_2010 - ras250m[[1]])
+plot(ras250m[[3]])
+
+# YEAR 3 - FISHING IMPACT----
+temp$New_Den <- 0
+# Year 3 Fishing impact @1% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1] ,"New_Den"] <- temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1]
+                                                                                                              ,"temp.Den.FR.10"] * stress.1$abu[i]
+}
+# bring values back to same scale as input
+temp$New_Den <- round(temp$New_Den / 100,digits = 2)
+# APPLY YR 3 RECOVERY (Fishing Only)----
+
+#(A) Calculate the difference in density from fishing impact (T1 - T0)
+temp$fish.diff <- temp$New_Den - temp$temp.Den.FR.10
+# (B) Calculate the difference in fishing impact as a proportion (reduced trawling impact)
+temp$trawl.diff.prop <- round(temp$Fishing_2010 / temp$Fishing_2011, digits = 2)
+# tidy -Remove NAs and Infs
+temp$trawl.diff.prop[is.na(temp$trawl.diff.prop)] <- 0
+temp$trawl.diff.prop[is.infinite(temp$trawl.diff.prop)] <- 0
+# (C) Calculate the proportion of reduced trawling impact of density in trawl difference
+# where values are (-) there is a decrease in fishing, hence recovery potential
+temp$temp.Den.prop.rec <- (temp$fish.diff - (temp$fish.diff * temp$trawl.diff.prop))/3
+temp$temp.Den.prop.rec[is.na(temp$temp.Den.prop.rec)] <- 0
+# (D) Add the modified recovery density back to the previous year 
+temp$temp.Den.FR.11 <-  round(temp$temp.Den.prop.rec + temp$New_Den, digits = 2)
+# (E) Adjust for inflated values by impact                                    
+temp <- transform(temp, temp.Den.FR.11 = ifelse(temp$temp.Den.FR.11  > temp$temp.Den.FR.10 , temp$temp.Den.FR.10, temp$temp.Den.FR.11))
+
+# Inspect visually / create raster 
+F_2011 <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                   y = imp.vars[,2],
+                                   z = temp[, "temp.Den.FR.11"]),
+                        crs = crs("+init=epsg:9191"))
+
+plot(F_2011)
+plot(F_2011 - ras250m[[1]])
+
+# YEAR 4- FISHING IMPACT----
+temp$New_Den <- 0
+# Year 4 Fishing impact @1% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1] ,"New_Den"] <- temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1]
+                                                                                                              ,"temp.Den.FR.11"] * stress.1$abu[i]
+}
+
+# bring values back to same scale as input
+temp$New_Den <- round(temp$New_Den / 100, digits = 2)
+# APPLY YR 4 RECOVERY (Fishing Only)----
+#(A) Calculate the difference in density from fishing impact (T1 - T0)
+temp$fish.diff <- temp$New_Den - temp$temp.Den.FR.11
+# (B) Calculate the difference in fishing impact as a proportion (reduced trawling impact)
+temp$trawl.diff.prop <- round(temp$Fishing_2011 / temp$Fishing_2012, digits = 2)
+# tidy -Remove NAs and Infs
+temp$trawl.diff.prop[is.na(temp$trawl.diff.prop)] <- 0
+temp$trawl.diff.prop[is.infinite(temp$trawl.diff.prop)] <- 0
+# (C) Calculate the proportion of reduced trawling impact of density in trawl difference
+# where values are (-) there is a decrease in fishing, hence recovery potential
+temp$temp.Den.prop.rec<- (temp$fish.diff - (temp$fish.diff * temp$trawl.diff.prop))/3
+# (D) Add the modified recovery density back to the previous year 
+temp$temp.Den.FR.12 <-  round(temp$temp.Den.prop.rec + temp$New_Den, digits = 2)
+# (E) Adjust for inflated values by impact 
+temp <- transform(temp, temp.Den.FR.12 = ifelse(temp$temp.Den.FR.12 > temp$temp.Den.FR.11, temp$temp.Den.FR.11, temp$temp.Den.FR.12))
+
+# Inspect visually / create raster 
+F_2012 <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                   y = imp.vars[,2],
+                                   z = temp[, "temp.Den.FR.12"]),
+                        crs = crs("+init=epsg:9191"))
+par(mfrow = c(1,3))
+plot(ras250m[[1]]) # original unstressed 
+plot(F_2012)
+plot(F_2012 - ras250m[[1]]) # new stress locations?
+
+# CREATE OUTPUTS
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V3/Fsh.only")
+writeRaster(F_2009, filename = "CAL.2009_FRO.tif", overwrite=T, progress = "window")
+writeRaster(F_2010, filename = "CAL.2010_FRO.tif", overwrite=T, progress = "window")
+writeRaster(F_2011, filename = "CAL.2011_FRO.tif", overwrite=T, progress = "window")
+writeRaster(F_2012, filename = "CAL.2012_FRO.tif", overwrite=T, progress = "window")
+
+# SAVE OUTPUTS----
+
+# FISHING AND SEDIMENT 
+# SAVE ALL OUTPUTS
+# 1% change 
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr1.1p, filename = "CAL_Fsh_yr1.1p.FRO.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr2.2p, filename = "CAL_Fsh_yr2.2p.FRO.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr3.3p, filename = "CAL_Fsh_yr3.3p.FRO.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr4.4p, filename = "CAL_Fsh_yr4.4p.FRO.tif", overwrite=T, progress = "window")
+# 2% change 
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr1.2p, filename = "CAL_Fsh_yr1.2p.FRO.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr2.4p, filename = "CAL_Fsh_yr2.4p.FRO.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr3.6p, filename = "CAL_Fsh_yr3.6p.FRO.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr4.8p, filename = "CAL_Fsh_yr4.8p.FRO.tif", overwrite=T, progress = "window")
+# 3 % change 
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr1.3p, filename = "CAL_Fsh_yr1.3p.FRO.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr2.6p, filename = "CAL_Fsh_yr2.6p.FRO.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr3.9p, filename = "CAL_Fsh_yr3.9p.FRO.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_yr4.12p, filename = "CAL_Fsh_yr4.12p.FRO.tif", overwrite=T, progress = "window")
+
+# ---- SEDIMENATION IMPACT ONLY SECTION #----
+#Load data---- 
+# YEAR 1 ----
+# Load sedimentation response curves from hurdle model, partitioned by 0.1 intervals (TABLE 1 - initial reference values)
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_curves")
+mud.res.hur <- read.csv(file = "Mud_c1.csv") # load modeled and smoothed response curve 
+mud.res.hur <- as.data.frame(cbind(mud.res.hur["Mud"], mud.res.hur["hur"]))
+mud.res.hur <- round(mud.res.hur, digits = 2) # round to 2 decimal places
+mud.res.hur <- na.omit(mud.res.hur)
+
+
+# This will include successive years of separate fishing stress (i.e 2010, 2011 etc..)
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Vars")
+f250m <- list.files(getwd())
+imp.var <-c("X","Y","FID",c(f250m))
+ras250m <- lapply(f250m, raster)
+plot(ras250m[[1]]) # check through layers make sure same extent and projection
+env250m_rs <- raster::stack(ras250m) #
+
+###-- CREATE TGB SPDF: Turn origonal raster stack and spatial points data into a dataframe 
+env250m_spdf <- rasterToPoints(env250m_rs, spatial = T) 
+env250m_df <- data.frame(env250m_spdf@data, X =env250m_spdf@coords[,1],Y = env250m_spdf@coords[,2])
+head(env250m_df)
+
+# ####---SET UNIQUE FID, EXTRACT X & Y( row and column numbers, not lat and long) data from raster stack ##
+env250m_spdf@coords 
+env250m_df$FID <- cellFromXY(env250m_rs, env250m_df[,c("X", "Y")])
+env250m_df <- env250m_df[,c(7:8,1:6,9)] # re-shuffle the order of columns, to put x and y at front
+
+# # # # # REMOVE ALL NA's from FISHING LAYER --
+# library(tidyverse)
+env250m_df <- env250m_df
+env250m_df<- env250m_df %>%
+  mutate(Fishing.trawl.2009 = if_else(is.na(Fishing.trawl.2009), 0, Fishing.trawl.2009),
+         Fishing.trawl.2010 = if_else(is.na(Fishing.trawl.2010), 0, Fishing.trawl.2010),
+         Fishing.trawl.2011 = if_else(is.na(Fishing.trawl.2011), 0, Fishing.trawl.2011),
+         Fishing.trawl.2012 = if_else(is.na(Fishing.trawl.2012), 0, Fishing.trawl.2012)) 
+
+# Remove NA's from other datasets
+env250m_df <- na.omit(env250m_df)
+imp.vars <- env250m_df
+
+# Original MUD data, directly from  spatial raster and density SDM (TABLE 2 - scenario values)
+mud.OG <- imp.vars[,c("Mud", "CAL_HUR_TGB_native","FID" ,"X", "Y")] # bring in values from TEMP
+colnames(mud.OG) <- c("Mud.OG", "Den.OG", "FID","X", "Y" )
+mud.OG <- round(mud.OG, digits = 2) # round to 3 decimal places
+
+# Create 3 new DFs, and populate with new reference data for each scenario mud percentage from Table 1 
+#  (1 % scenario year 1 )
+df1 <- mud.OG 
+df1$one.p.mud <- round(df1$Mud.OG * 0.01 + df1$Mud.OG, digits =  2) # + 1%
+df1 <- transform(df1,one.p.mud = ifelse(one.p.mud > 100, 100, one.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+#  ((2 % scenario year 1 )
+df2 <- mud.OG 
+df2$two.p.mud <- round(df2$Mud.OG * 0.02 + df2$Mud.OG, digits =  2) # + 2%
+df2 <- transform(df2,two.p.mud = ifelse(two.p.mud > 100, 100, two.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+# (3% scenario year 1 )
+df3 <- mud.OG 
+df3$three.p.mud <- round(df3$Mud.OG * 0.03 + df3$Mud.OG, digits =  2) # + 3%
+df3 <- transform(df3,three.p.mud = ifelse(three.p.mud > 100, 100, three.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+
+# Lookup across tables (reference to scenario)
+##---ONE PERCENT ANNUAL CHANGE Yr 1---- (ABSOLUTE DIFFERENCE)
+inds <- match(df1$Mud.OG, mud.res.hur$Mud) # create index of row numbers that correspond to matching reference mud values
+df1$Abu.inital.1p <- mud.res.hur$hur[inds] # initial abundance value at given response mud %  - subset the row index, to table 1 hurdle values, and populate table 2
+inds <- match(df1$one.p.mud , mud.res.hur$Mud) # create index of row numbers that correspond to matching mud between original and scenario
+df1$Abu.scen1p <- mud.res.hur$hur[inds] # new abundance value based on scenario mud % ( one.p.mud) - subset the row index, to table 1 hurdle values, and populate table 2
+df1$diff.1p <- df1$Abu.scen1p - df1$Abu.inital.1p # absolute difference between density at scenario mud levels, and original mud levels
+df1$New_Den.yr1.1p.S <- (mud.OG$Den.OG) + (df1$diff.1p) # add density difference from increased mud, to original 
+##---TWO PERCENT ANNUAL CHANGE Yr 1---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df2$Abu.inital.2p <- mud.res.hur$hur[inds] 
+inds <- match(df2$two.p.mud , mud.res.hur$Mud) 
+df2$Abu.scen2p <- mud.res.hur$hur[inds] 
+df2$diff.2p <- df2$Abu.scen2p - df2$Abu.inital.2p  # *
+df2$New_Den.yr1.2p.S <- (mud.OG$Den.OG) + (df2$diff.2p) # should be mud.OG$New_Den_09.F
+##---THREE PERCENT ANNUAL CHANGE Yr 1---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df3$Abu.inital.3p <- mud.res.hur$hur[inds] 
+inds <- match(df3$three.p.mud , mud.res.hur$Mud) 
+df3$Abu.scen3p <- mud.res.hur$hur[inds] 
+df3$diff.3p <- df3$Abu.scen3p - df3$Abu.inital.3p  # *
+df3$New_Den.yr1.3p.S <- (mud.OG$Den.OG) + (df3$diff.3p) # OG + Sed 
+
+# YEAR 2 #----
+# (2-6% mud)
+#  (1 % scenario year 2 )
+df1$Mud.OG <- mud.OG$Mud.OG 
+df1$two.p.mud <- round(df1$Mud.OG * 0.02 + df1$Mud.OG, digits =  2) # + 1%
+df1 <- transform(df1,two.p.mud = ifelse(two.p.mud > 100, 100, two.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+#  ((2 % scenario year 2 )
+df2$Mud.OG <- mud.OG$Mud.OG 
+df2$four.p.mud <- round(df2$Mud.OG * 0.04 + df2$Mud.OG, digits =  2) # + 2%
+df2 <- transform(df2,four.p.mud = ifelse(four.p.mud > 100, 100, four.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+# (3% scenario year 2 )
+df3$Mud.OG <- mud.OG$Mud.OG  
+df3$six.p.mud <- round(df3$Mud.OG * 0.06 + df3$Mud.OG, digits =  2) # + 3%
+df3 <- transform(df3,six.p.mud = ifelse(six.p.mud > 100, 100, six.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+
+# Lookup across tables (reference to scenario)
+##---ONE PERCENT ANNUAL CHANGE Yr 2---- (ABSOLUTE DIFFERENCE)
+inds <- match(df1$Mud.OG, mud.res.hur$Mud) 
+df1$Abu.inital.2p <- mud.res.hur$hur[inds] 
+inds <- match(df1$two.p.mud , mud.res.hur$Mud) 
+df1$Abu.scen2p <- mud.res.hur$hur[inds] # 
+df1$diff.2p <- df1$Abu.scen2p - df1$Abu.inital.2p # 
+df1$New_Den.yr2.2p.S <- (df1$New_Den.yr1.1p.S) + (df1$diff.2p) # 
+##---TWO PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df2$Abu.inital.4p <- mud.res.hur$hur[inds] 
+inds <- match(df2$four.p.mud , mud.res.hur$Mud) 
+df2$Abu.scen4p <- mud.res.hur$hur[inds] 
+df2$diff.4p <- df2$Abu.scen4p - df2$Abu.inital.4p  # *
+df2$New_Den.yr2.4p.S <- (df2$New_Den.yr1.2p.S) + (df2$diff.4p)
+##---THREE PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df3$Abu.inital.6p <- mud.res.hur$hur[inds] 
+inds <- match(df3$six.p.mud , mud.res.hur$Mud) 
+df3$Abu.scen6p <- mud.res.hur$hur[inds] 
+df3$diff.6p <- df3$Abu.scen6p - df3$Abu.inital.6p  # *
+df3$New_Den.yr2.6p.S <- (df3$New_Den.yr1.3p.S) + (df3$diff.6p) 
+
+
+# YEAR 3 ----
+# (2-6% mud)
+#  (1 % scenario year 2 )
+df1$Mud.OG <- mud.OG$Mud.OG 
+df1$three.p.mud <- round(df1$Mud.OG * 0.03 + df1$Mud.OG, digits =  2) # + 1%
+df1 <- transform(df1,three.p.mud = ifelse(three.p.mud > 100, 100, three.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+#  ((2 % scenario year 2 )
+df2$Mud.OG <- mud.OG$Mud.OG 
+df2$six.p.mud <- round(df2$Mud.OG * 0.06 + df2$Mud.OG, digits =  2) # + 2%
+df2 <- transform(df2,six.p.mud = ifelse(six.p.mud > 100, 100, six.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+# (3% scenario year 2 )
+df3$Mud.OG <- mud.OG$Mud.OG  
+df3$nine.p.mud <- round(df3$Mud.OG * 0.09 + df3$Mud.OG, digits =  2) # + 3%
+df3 <- transform(df3,nine.p.mud = ifelse(nine.p.mud > 100, 100, nine.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+
+# Lookup across tables (reference to scenario)
+##---ONE PERCENT ANNUAL CHANGE Yr 2---- (ABSOLUTE DIFFERENCE)
+inds <- match(df1$Mud.OG, mud.res.hur$Mud) 
+df1$Abu.inital.3p <- mud.res.hur$hur[inds] 
+inds <- match(df1$three.p.mud , mud.res.hur$Mud) 
+df1$Abu.scen3p <- mud.res.hur$hur[inds] # 
+df1$diff.3p <- df1$Abu.scen3p - df1$Abu.inital.3p # 
+df1$New_Den.yr3.3p.S <- (df1$New_Den.yr2.2p.S) + (df1$diff.3p) # 
+##---TWO PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df2$Abu.inital.6p <- mud.res.hur$hur[inds] 
+inds <- match(df2$six.p.mud , mud.res.hur$Mud) 
+df2$Abu.scen6p <- mud.res.hur$hur[inds] 
+df2$diff.6p <- df2$Abu.scen6p - df2$Abu.inital.6p  # *
+df2$New_Den.yr3.6p.S <- (df2$New_Den.yr2.4p.S) + (df2$diff.6p)
+##---THREE PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df3$Abu.inital.9p <- mud.res.hur$hur[inds] 
+inds <- match(df3$nine.p.mud , mud.res.hur$Mud) 
+df3$Abu.scen9p <- mud.res.hur$hur[inds] 
+df3$diff.9p <- df3$Abu.scen9p - df3$Abu.inital.9p  # *
+df3$New_Den.yr3.9p.S <- (df3$New_Den.yr2.6p.S) + (df3$diff.9p) 
+
+
+# YEAR 4 ----
+# (4-12% mud)
+#  (1 % scenario year 4 )
+df1$Mud.OG <- mud.OG$Mud.OG 
+df1$four.p.mud <- round(df1$Mud.OG * 0.04 + df1$Mud.OG, digits =  2) # + 1%
+df1 <- transform(df1,four.p.mud = ifelse(four.p.mud > 100, 100, four.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+#  ((2 % scenario year 4 )
+df2$Mud.OG <- mud.OG$Mud.OG 
+df2$eight.p.mud <- round(df2$Mud.OG * 0.08 + df2$Mud.OG, digits =  2) # + 2%
+df2 <- transform(df2,eight.p.mud = ifelse(eight.p.mud > 100, 100, eight.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+# (3% scenario year 4 )
+df3$Mud.OG <- mud.OG$Mud.OG  
+df3$twelve.p.mud <- round(df3$Mud.OG * 0.12 + df3$Mud.OG, digits =  2) # + 3%
+df3 <- transform(df3,twelve.p.mud = ifelse(twelve.p.mud > 100, 100, twelve.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+
+# Lookup across tables (reference to scenario)
+##---ONE PERCENT ANNUAL CHANGE Yr 2---- (ABSOLUTE DIFFERENCE)
+inds <- match(df1$Mud.OG, mud.res.hur$Mud) 
+df1$Abu.inital.4p <- mud.res.hur$hur[inds] 
+inds <- match(df1$three.p.mud , mud.res.hur$Mud) 
+df1$Abu.scen4p <- mud.res.hur$hur[inds] # 
+df1$diff.4p <- df1$Abu.scen3p - df1$Abu.inital.3p # 
+df1$New_Den.yr4.4p.S <- (df1$New_Den.yr3.3p.S) + (df1$diff.4p) # 
+##---TWO PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df2$Abu.inital.8p <- mud.res.hur$hur[inds] 
+inds <- match(df2$eight.p.mud , mud.res.hur$Mud) 
+df2$Abu.scen8p <- mud.res.hur$hur[inds] 
+df2$diff.8p <- df2$Abu.scen6p - df2$Abu.inital.8p  # *
+df2$New_Den.yr4.8p.S <- (df2$New_Den.yr3.6p.S) + (df2$diff.8p)
+##---THREE PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df3$Abu.inital.12p <- mud.res.hur$hur[inds] 
+inds <- match(df3$twelve.p.mud , mud.res.hur$Mud) 
+df3$Abu.scen12p <- mud.res.hur$hur[inds] 
+df3$diff.12p <- df3$Abu.scen12p - df3$Abu.inital.12p  # *
+df3$New_Den.yr4.12p.S <- (df3$New_Den.yr3.9p.S) + (df3$diff.12p) 
+
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/MUD")
+# PLOT RASTER OF CUMULATIVE CHANGE----
+
+# ORIGONAL
+CAL.SDM <- rasterFromXYZ(data.frame(x = df1[,"X"],
+                                    y = df1[,"Y"],
+                                    z = df1[, "Den.OG"]),
+                         crs = crs("+init=epsg:9191"))
+plot(CAL.SDM)
+# 1% cumulative over four years (total of 4%) 
+CAL.mud.yr1.p1 <- rasterFromXYZ(data.frame(x = df1[,"X"],
+                                           y = df1[,"Y"],
+                                           z = df1[, "New_Den.yr1.1p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr1.p1)
+###
+CAL.mud.yr2.p2 <- rasterFromXYZ(data.frame(x = df1[,"X"],
+                                           y = df1[,"Y"],
+                                           z = df1[, "New_Den.yr2.2p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr2.p2)
+###
+CAL.mud.yr3.p3 <- rasterFromXYZ(data.frame(x = df1[,"X"],
+                                           y = df1[,"Y"],
+                                           z = df1[, "New_Den.yr3.3p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr3.p3)
+###
+CAL.mud.yr4.p4 <- rasterFromXYZ(data.frame(x = df1[,"X"],
+                                           y = df1[,"Y"],
+                                           z = df1[, "New_Den.yr4.4p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr4.p4)
+
+# 2% cumulative over four years (total of 8%) 
+CAL.mud.yr1.p2 <- rasterFromXYZ(data.frame(x = df2[,"X"],
+                                           y = df2[,"Y"],
+                                           z = df2[, "New_Den.yr1.2p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr1.p2)
+###
+CAL.mud.yr2.p4 <- rasterFromXYZ(data.frame(x = df2[,"X"],
+                                           y = df2[,"Y"],
+                                           z = df2[, "New_Den.yr2.4p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr2.p4)
+###
+CAL.mud.yr3.p6 <- rasterFromXYZ(data.frame(x = df2[,"X"],
+                                           y = df2[,"Y"],
+                                           z = df2[, "New_Den.yr3.6p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr3.p6)
+###
+CAL.mud.yr4.p8 <- rasterFromXYZ(data.frame(x = df2[,"X"],
+                                           y = df2[,"Y"],
+                                           z = df2[, "New_Den.yr4.8p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr4.p8)
+
+# 3% cumulative over four years (total of 12%) 
+CAL.mud.yr1.p3 <- rasterFromXYZ(data.frame(x = df3[,"X"],
+                                           y = df3[,"Y"],
+                                           z = df3[, "New_Den.yr1.3p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr1.p3)
+###
+CAL.mud.yr2.p6 <- rasterFromXYZ(data.frame(x = df3[,"X"],
+                                           y = df3[,"Y"],
+                                           z = df3[, "New_Den.yr2.6p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr2.p6)
+###
+CAL.mud.yr3.p9 <- rasterFromXYZ(data.frame(x = df3[,"X"],
+                                           y = df3[,"Y"],
+                                           z = df3[, "New_Den.yr3.9p.S"]),
+                                crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr3.p9)
+###
+CAL.mud.yr4.p12 <- rasterFromXYZ(data.frame(x = df3[,"X"],
+                                            y = df3[,"Y"],
+                                            z = df3[, "New_Den.yr4.12p.S"]),
+                                 crs = crs("+init=epsg:9191"))
+plot(CAL.mud.yr4.p12)
+plot(CAL.mud.yr4.p12 - CAL.SDM)
+
+
+# The actual difference
+#1% over 4 years
+CAL.sed.yr4.4p.diff <- rasterFromXYZ(data.frame(x = df1[,"X"],
+                                                y = df1[,"Y"],
+                                                z = df1[, "diff.4p"]),
+                                     crs = crs("+init=epsg:9191"))
+plot(CAL.sed.yr4.4p.diff)
+#2% over 4 years
+CAL.sed.yr4.8p.diff <- rasterFromXYZ(data.frame(x = df2[,"X"],
+                                                y = df2[,"Y"],
+                                                z = df2[, "diff.8p"]),
+                                     crs = crs("+init=epsg:9191"))
+plot(CAL.sed.yr4.8p.diff)
+#3% over 4 years
+CAL.sed.yr4.12p.diff <- rasterFromXYZ(data.frame(x = df3[,"X"],
+                                                 y = df3[,"Y"],
+                                                 z = df3[, "diff.12p"]),
+                                      crs = crs("+init=epsg:9191"))
+plot(CAL.sed.yr4.12p.diff)
+
+# SAVE RASTERS ----
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/MUD")
+#1% Annually 
+writeRaster(CAL.mud.yr1.p1,filename = "CAL.sed.yr1.p1.tif", overwrite=T, progress = "window")
+writeRaster(CAL.mud.yr2.p2,filename = "CAL.sed.yr2.p2.tif", overwrite=T, progress = "window")
+writeRaster(CAL.mud.yr3.p3,filename = "CAL.sed.yr3.p3.tif", overwrite=T, progress = "window")
+writeRaster(CAL.mud.yr4.p4,filename = "CAL.sed.yr4.p4.tif", overwrite=T, progress = "window")
+# 2% Annually 
+writeRaster(CAL.mud.yr1.p2,filename = "CAL.sed.yr1.p2.tif", overwrite=T, progress = "window")
+writeRaster(CAL.mud.yr2.p4,filename = "CAL.sed.yr2.p4.tif", overwrite=T, progress = "window")
+writeRaster(CAL.mud.yr3.p6,filename = "CAL.sed.yr3.p6.tif", overwrite=T, progress = "window")
+writeRaster(CAL.mud.yr4.p8,filename = "CAL.sed.yr4.p8.tif", overwrite=T, progress = "window")
+# 3% Annually 
+writeRaster(CAL.mud.yr1.p3,filename = "CAL.sed.yr1.p3.tif", overwrite=T, progress = "window")
+writeRaster(CAL.mud.yr2.p6,filename = "CAL.sed.yr2.p6.tif", overwrite=T, progress = "window")
+writeRaster(CAL.mud.yr3.p9,filename = "CAL.sed.yr3.p9.tif", overwrite=T, progress = "window")
+writeRaster(CAL.mud.yr4.p12,filename = "CAL.sed.yr4.p12.tif", overwrite=T, progress = "window")
+# difference 
+writeRaster(CAL.sed.yr4.4p.diff,filename = "CAL.SDM.yr.4.4p.diff.tif", overwrite=T, progress = "window")
+writeRaster(CAL.sed.yr4.8p.diff,filename = "CAL.SDM.yr.4.8p.diff.tif", overwrite=T, progress = "window")
+writeRaster(CAL.sed.yr4.12p.diff,filename = "CAL.SDM.yr.4.12p.diff.tif", overwrite=T, progress = "window")
+
+
+#-------------------###### FISHING & SED WITH RECOVERY SECTION (FR) ####---------------------
+# 1 Load data---- 
+# This will include successive years of separate fishing stress (i.e 2010, 2011 etc..)
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Vars")
+f250m <- list.files(getwd())
+imp.var <-c("X","Y","FID",c(f250m))
+ras250m <- lapply(f250m, raster)
+plot(ras250m[[1]]) # check through layers make sure same extent and projection
+env250m_rs <- raster::stack(ras250m) #
+
+###-- CREATE TGB SPDF: Turn origonal raster stack and spatial points data into a dataframe 
+env250m_spdf <- rasterToPoints(env250m_rs, spatial = T) 
+env250m_df <- data.frame(env250m_spdf@data, X =env250m_spdf@coords[,1],Y = env250m_spdf@coords[,2])
+head(env250m_df)
+
+# ####---SET UNIQUE FID, EXTRACT X & Y( row and column numbers, not lat and long) data from raster stack ##
+env250m_spdf@coords 
+env250m_df$FID <- cellFromXY(env250m_rs, env250m_df[,c("X", "Y")])
+env250m_df <- env250m_df[,c(7:8,1:6,9)] # re-shuffle the order of columns, to put x and y at front
+
+# # # # # REMOVE ALL NA's from FISHING LAYER --
+# library(tidyverse)
+env250m_df <- env250m_df
+env250m_df<- env250m_df %>%
+  mutate(Fishing.trawl.2009 = if_else(is.na(Fishing.trawl.2009), 0, Fishing.trawl.2009),
+         Fishing.trawl.2010 = if_else(is.na(Fishing.trawl.2010), 0, Fishing.trawl.2010),
+         Fishing.trawl.2011 = if_else(is.na(Fishing.trawl.2011), 0, Fishing.trawl.2011),
+         Fishing.trawl.2012 = if_else(is.na(Fishing.trawl.2012), 0, Fishing.trawl.2012)) 
+
+# Remove NA's from other datasets
+env250m_df <- na.omit(env250m_df)
+imp.vars <- env250m_df
+imp.vars <- imp.vars %>% mutate_at (3:8, round, 2)
+# Add new column for modified density 
+imp.vars$New_Den_09 <- 0
+colnames(imp.vars) <- c("X", "Y", "Den.OG", "Fishing_2009","Fishing_2010","Fishing_2011","Fishing_2012", "Mud.OG", "FID", "New_Den_09.F")
+
+## LOAD STRESS CURVE ----
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_curves")
+stress.1 <- as.data.frame(read.csv(file = "Fishing_c1_yr1.csv", header = T, sep = ",")) # stressor response curve
+
+
+#  YEAR 1 - FISHING IMPACT ----
+temp <- imp.vars
+# i = 1
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2009 >= stress.1[i, 1] & temp$Fishing_2009 < stress.1[i+1 ,1] ,"New_Den_09.F"] <- temp[temp$Fishing_2009 >= stress.1[i, 1] & temp$Fishing_2009 < stress.1[i+1 ,1]
+                                                                                                      ,"Den.OG"] * stress.1$abu[i]
+}
+# bring values back to same scale as input
+temp$New_Den_09.F <- temp$New_Den_09.F / 100
+
+# Inspect visually / create raster 
+F_2009 <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                   y = imp.vars[,2],
+                                   z = temp[, "New_Den_09.F"]),
+                        crs = crs("+init=epsg:9191"))
+
+plot(ras250m[[1]]) # original unstressed 
+plot(F_2009)
+plot(F_2009 - ras250m[[1]])
+
+# YEAR 1 - SEDIMENTATION IMPACT----
+# Load sedimentation response curves from hurdle model, partitioned by 0.1 intervals (TABLE 1 - initial reference values)
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_curves")
+mud.res.hur <- read.csv(file = "Mud_c1.csv") # load modeled and smoothed response curve 
+mud.res.hur <- as.data.frame(cbind(mud.res.hur["Mud"], mud.res.hur["hur"]))
+mud.res.hur <- round(mud.res.hur, digits = 2) # round to 2 decimal places
+mud.res.hur <- na.omit(mud.res.hur)
+# Original MUD data, directly from  spatial raster and density SDM (TABLE 2 - scenario values)
+mud.OG <- temp[,c("Mud.OG", "New_Den_09.F","FID" ,"X", "Y")] # bring in values from TEMP
+colnames(mud.OG) <- c("Mud.OG", "New_Den_09.F", "FID","X", "Y" )
+mud.OG <- round(mud.OG, digits = 2) # round to 3 decimal places
+
+# Create 3 new DFs, and populate with new reference data for each scenario mud percentage from Table 1 
+# YEAR 1 SEDIMENTATION 
+#  (1 % scenario year 1 )
+df1 <- mud.OG 
+df1$one.p.mud <- round(df1$Mud.OG * 0.01 + df1$Mud.OG, digits =  2) # + 1%
+df1 <- transform(df1,one.p.mud = ifelse(one.p.mud > 100, 100, one.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+#  ((2 % scenario year 1 )
+df2 <- mud.OG 
+df2$two.p.mud <- round(df2$Mud.OG * 0.02 + df2$Mud.OG, digits =  2) # + 2%
+df2 <- transform(df2,two.p.mud = ifelse(two.p.mud > 100, 100, two.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+# (3% scenario year 1 )
+df3 <- mud.OG 
+df3$three.p.mud <- round(df3$Mud.OG * 0.03 + df3$Mud.OG, digits =  2) # + 3%
+df3 <- transform(df3,three.p.mud = ifelse(three.p.mud > 100, 100, three.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+
+# Lookup across tables (reference to scenario)
+##---ONE PERCENT ANNUAL CHANGE Yr 1---- (ABSOLUTE DIFFERENCE)
+inds <- match(df1$Mud.OG, mud.res.hur$Mud) # create index of row numbers that correspond to matching reference mud values
+df1$Abu.inital.1p <- mud.res.hur$hur[inds] # initial abundance value at given response mud %  - subset the row index, to table 1 hurdle values, and populate table 2
+inds <- match(df1$one.p.mud , mud.res.hur$Mud) # create index of row numbers that correspond to matching mud between original and scenario
+df1$Abu.scen1p <- mud.res.hur$hur[inds] # new abundance value based on scenario mud % ( one.p.mud) - subset the row index, to table 1 hurdle values, and populate table 2
+df1$diff.1p <- df1$Abu.scen1p - df1$Abu.inital.1p # absolute difference between density at scenario mud levels, and original mud levels
+df1$New_Den.yr1.1p.S <- (temp$Den.OG) + (df1$diff.1p) # add density difference from increased mud, to original 
+##---TWO PERCENT ANNUAL CHANGE Yr 1---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df2$Abu.inital.2p <- mud.res.hur$hur[inds] 
+inds <- match(df2$two.p.mud , mud.res.hur$Mud) 
+df2$Abu.scen2p <- mud.res.hur$hur[inds] 
+df2$diff.2p <- df2$Abu.scen2p - df2$Abu.inital.2p  # *
+df2$New_Den.yr1.2p.S <- (temp$Den.OG) + (df2$diff.2p) # should be temp$New_Den_09.F
+##---THREE PERCENT ANNUAL CHANGE Yr 1---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df3$Abu.inital.3p <- mud.res.hur$hur[inds] 
+inds <- match(df3$three.p.mud , mud.res.hur$Mud) 
+df3$Abu.scen3p <- mud.res.hur$hur[inds] 
+df3$diff.3p <- df3$Abu.scen3p - df3$Abu.inital.3p  # *
+df3$New_Den.yr1.3p.S <- (temp$Den.OG) + (df3$diff.3p) # OG + Sed 
+
+# YR1 COMBINE sedimentation & Fishing effects ----
+# if there are no effects from fishing, use sedimentation values, otherwise, combine the sedimentation difference to the fishing density
+df1 <- round(transform(df1, New_Den_09.1p.FS = ifelse(temp$Fishing_2009 == 0, New_Den.yr1.1p.S, (temp$New_Den_09.F + df1$diff.1p))), digits = 2) 
+df2 <- round(transform (df2, New_Den_09.2p.FS = ifelse(temp$Fishing_2009 == 0, New_Den.yr1.2p.S, (temp$New_Den_09.F + df2$diff.2p))), digits = 2)
+df3 <- round(transform (df3, New_Den_09.3p.FS = ifelse(temp$Fishing_2009 == 0, New_Den.yr1.3p.S, (temp$New_Den_09.F + df3$diff.3p))), digits = 2)
+
+# year one fishing impact only                 = New_Den_09.F
+#Year one fishing and sediment impact combined = New_Den_09.1p.FS
+#---------------------------###  COMB - YR 2 -----------------------------------------
+
+# YEAR 2 - FISHING IMPACT without recovery ----
+##!!! IMPORTANT - Starting density will be previous year fishing & sedimentation impacted density. BUT, recovery from fishing, can only be applied with 
+# difference in density from fishing impact ONLY, then these density values, must be added back into the final sediment change density post recovery.
+
+# add the fishing and sediment impacted layer to temp
+temp$New_Den_09.1p.FS <- df1$New_Den_09.1p.FS
+temp$New_Den_09.2p.FS <- df2$New_Den_09.2p.FS
+temp$New_Den_09.3p.FS <- df3$New_Den_09.3p.FS
+
+# Correlative stressor model - the left hand of the equation is the raster created, the right hand of the equation performed the calculation.
+# Year 2 Fishing impact @1% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2010 >= stress.1[i, 1] & temp$Fishing_2010 < stress.1[i+1 ,1] ,"New_Den_10.1p.F"] <- temp[temp$Fishing_2010 >= stress.1[i, 1] & temp$Fishing_2010 < stress.1[i+1 ,1]
+                                                                                                           ,"New_Den_09.1p.FS"] * stress.1$abu[i]
+}
+# Year 2 Fishing impact @2% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2010 >= stress.1[i, 1] & temp$Fishing_2010 < stress.1[i+1 ,1] ,"New_Den_10.2p.F"] <- temp[temp$Fishing_2010 >= stress.1[i, 1] & temp$Fishing_2010 < stress.1[i+1 ,1]
+                                                                                                           ,"New_Den_09.2p.FS"] * stress.1$abu[i]
+}
+# Year 2 Fishing impact @3% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2010 >= stress.1[i, 1] & temp$Fishing_2010 < stress.1[i+1 ,1] ,"New_Den_10.3p.F"] <- temp[temp$Fishing_2010 >= stress.1[i, 1] & temp$Fishing_2010 < stress.1[i+1 ,1]
+                                                                                                           ,"New_Den_09.3p.FS"] * stress.1$abu[i]
+}
+# bring values back to same scale as input
+temp$New_Den_10.1p.F <- temp$New_Den_10.1p.F / 100
+temp$New_Den_10.2p.F <- temp$New_Den_10.2p.F / 100
+temp$New_Den_10.3p.F <- temp$New_Den_10.3p.F / 100
+
+# Inspect visually / create raster 
+F_2010.F <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                   y = imp.vars[,2],
+                                   z = temp[, "New_Den_09.3p.FS"]),
+                        crs = crs("+init=epsg:9191"))
+par(mfrow = c(1,3))
+
+plot(ras250m[[1]]) # original unstressed 
+plot(F_2009)
+plot(F_2010.F - ras250m[[1]]) # where has density reduced?
+
+
+#YEAR 2 - SEDIMENTATION (still without recovery applied)----
+# (2-6% mud)
+#  (1 % scenario year 2 )
+df1$Mud.OG <- mud.OG$Mud.OG 
+df1$two.p.mud <- round(df1$Mud.OG * 0.02 + df1$Mud.OG, digits =  2) # + 1%
+df1 <- transform(df1,two.p.mud = ifelse(two.p.mud > 100, 100, two.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+#  ((2 % scenario year 2 )
+df2$Mud.OG <- mud.OG$Mud.OG 
+df2$four.p.mud <- round(df2$Mud.OG * 0.04 + df2$Mud.OG, digits =  2) # + 2%
+df2 <- transform(df2,four.p.mud = ifelse(four.p.mud > 100, 100, four.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+# (3% scenario year 2 )
+df3$Mud.OG <- mud.OG$Mud.OG  
+df3$six.p.mud <- round(df3$Mud.OG * 0.06 + df3$Mud.OG, digits =  2) # + 3%
+df3 <- transform(df3,six.p.mud = ifelse(six.p.mud > 100, 100, six.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+
+# Lookup across tables (reference to scenario)
+##---ONE PERCENT ANNUAL CHANGE Yr 2---- (ABSOLUTE DIFFERENCE)
+inds <- match(df1$Mud.OG, mud.res.hur$Mud) 
+df1$Abu.inital.2p <- mud.res.hur$hur[inds] 
+inds <- match(df1$two.p.mud , mud.res.hur$Mud) 
+df1$Abu.scen2p <- mud.res.hur$hur[inds] # 
+df1$diff.2p <- df1$Abu.scen2p - df1$Abu.inital.2p # 
+df1$New_Den.yr2.2p.S <- (temp$New_Den_10.1p.F) + (df1$diff.2p) # 
+##---TWO PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df2$Abu.inital.4p <- mud.res.hur$hur[inds] 
+inds <- match(df2$four.p.mud , mud.res.hur$Mud) 
+df2$Abu.scen4p <- mud.res.hur$hur[inds] 
+df2$diff.4p <- df2$Abu.scen4p - df2$Abu.inital.4p  # *
+df2$New_Den.yr2.4p.S <- (temp$New_Den_10.2p.F) + (df2$diff.4p)
+##---THREE PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df3$Abu.inital.6p <- mud.res.hur$hur[inds] 
+inds <- match(df3$six.p.mud , mud.res.hur$Mud) 
+df3$Abu.scen6p <- mud.res.hur$hur[inds] 
+df3$diff.6p <- df3$Abu.scen6p - df3$Abu.inital.6p  # *
+df3$New_Den.yr2.6p.S <- (temp$New_Den_10.3p.F) + (df3$diff.6p) 
+
+## DOUBLE CHECK IT SPATIALLY
+# Inspect visually / create raster 
+F_2010.S <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                   y = imp.vars[,2],
+                                   z = df3[, "New_Den.yr2.6p.S"]),
+                        crs = crs("+init=epsg:9191"))
+par(mfrow = c(1,3))
+plot(ras250m[[1]]) # original unstressed 
+plot(F_2010.F) # year 1 fishing stress 
+plot(F_2010.S) # year 1 fishing stress 
+plot(F_2010.S - F_2010.F) # where does sedimentation stress occur?
+
+# YR2 COMBINE sedimentation & Fishing effects of the previous year, for year 2 model ----
+# if there are no effects of fishing, use sedimentation values, otherwise, combine the sedimentation difference to the fishing density
+df1 <- transform(df1, New_Den_10.2p.FS = ifelse(temp$Fishing_2010 == 0, New_Den.yr2.2p.S, (temp$New_Den_10.1p.F + df1$diff.2p))) 
+df2 <- transform (df2, New_Den_10.4p.FS = ifelse(temp$Fishing_2010 == 0, New_Den.yr2.4p.S, (temp$New_Den_10.2p.F + df2$diff.4p)))
+df3 <- transform (df3, New_Den_10.6p.FS = ifelse(temp$Fishing_2010 == 0, New_Den.yr2.6p.S, (temp$New_Den_10.3p.F + df3$diff.6p)))
+
+# RECOVERY YR2 (Fishing only --.FSR variable)---- (proportional recovery =  Yr 1 impact/ Yr 2)----
+
+#(A) Calculate the difference in density from fishing impact (T1 - T0)
+df1$fish.diff.10_09.2p <- temp$New_Den_10.1p.F - temp$New_Den_09.1p.FS
+df2$fish.diff.10_09.4p <- temp$New_Den_10.2p.F - temp$New_Den_09.2p.FS
+df3$fish.diff.10_09.6p <- temp$New_Den_10.3p.F - temp$New_Den_09.3p.FS
+# (B) Calculate the difference in fishing impact as a proportion (reduced trawling impact)
+df1$trawl.diff.prop.10_09 <- temp$Fishing_2009 / temp$Fishing_2010
+# tidy -Remove NAs and Infs
+df1$trawl.diff.prop.10_09[is.na(df1$trawl.diff.prop.10_09)] <- 0
+df1$trawl.diff.prop.10_09[is.infinite(df1$trawl.diff.prop.10_09)] <- 0
+# (C) Calculate the proportion of reduced trawling impact of density in trawl difference
+# where values are (-) there is a decrease in fishing, hence recovery potential
+df1$temp.Den.prop.rec.10_09.2p <- (df1$fish.diff.10_09.2p - (df1$fish.diff.10_09.2p * df1$trawl.diff.prop.10_09))/3 # THIS DIVISON FACTOR IS TAXON SPECIFIC, NOT REQUIRED FOR TAXA THAT RECOVER IN < 12 MONTHS
+df2$temp.Den.prop.rec.10_09.4p <- (df2$fish.diff.10_09.4p - (df2$fish.diff.10_09.4p * df1$trawl.diff.prop.10_09))/3
+df3$temp.Den.prop.rec.10_09.6p <- (df3$fish.diff.10_09.6p - (df3$fish.diff.10_09.6p * df1$trawl.diff.prop.10_09))/3
+# (D) Add the modified recovery density back to the previous year 
+df1$temp.Den.2010.2p.FR <-  df1$temp.Den.prop.rec.10_09.2p + temp$New_Den_10.1p.F
+df2$temp.Den.2010.4p.FR <-  df2$temp.Den.prop.rec.10_09.4p + temp$New_Den_10.2p.F
+df3$temp.Den.2010.6p.FR <-  df3$temp.Den.prop.rec.10_09.6p + temp$New_Den_10.3p.F
+# (E) Adjust for inflated values by impact
+df1 <- transform(df1, temp.Den.2010.2p.FR = ifelse(temp.Den.2010.2p.FR > temp$New_Den_09.1p.FS, temp$New_Den_09.1p.FS, temp.Den.2010.2p.FR))
+df2 <- transform(df2, temp.Den.2010.4p.FR = ifelse(temp.Den.2010.4p.FR > temp$New_Den_09.2p.FS, temp$New_Den_09.2p.FS, temp.Den.2010.4p.FR))
+df3 <- transform(df3, temp.Den.2010.6p.FR = ifelse(temp.Den.2010.6p.FR > temp$New_Den_09.3p.FS, temp$New_Den_09.3p.FS, temp.Den.2010.6p.FR))
+# (F) Add the recovered fishing density, back to the combined Sediment and Fishing 
+temp$New_Den_10.2p.FSR <- (df1$temp.Den.2010.2p.FR - temp$New_Den_10.1p.F)  + df1$New_Den_10.2p.FS
+temp$New_Den_10.4p.FSR <- (df2$temp.Den.2010.4p.FR - temp$New_Den_10.2p.F)  + df2$New_Den_10.4p.FS
+temp$New_Den_10.6p.FSR <- (df3$temp.Den.2010.6p.FR - temp$New_Den_10.3p.F)  + df3$New_Den_10.6p.FS
+
+#---------------------------###  COMB - YR 3 -----------------------------------------
+
+
+# YEAR 3 - FISHING IMPACT----
+
+# Year 3 Fishing impact @1% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1] ,"New_Den_11.2p.F"] <- temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1]
+                                                                                                              ,"New_Den_10.2p.FSR"] * stress.1$abu[i]
+}
+# Year 3 Fishing impact @2% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1] ,"New_Den_11.4p.F"] <- temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1]
+                                                                                                              ,"New_Den_10.4p.FSR"] * stress.1$abu[i]
+}
+# Year 3 Fishing impact @3% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1] ,"New_Den_11.6p.F"] <- temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1]
+                                                                                                              ,"New_Den_10.6p.FSR"] * stress.1$abu[i]
+}
+# bring values back to same scale as input
+temp$New_Den_11.2p.F <- temp$New_Den_11.2p.F / 100
+temp$New_Den_11.4p.F <- temp$New_Den_11.4p.F / 100
+temp$New_Den_11.6p.F <- temp$New_Den_11.6p.F  / 100
+
+# Inspect visually / create raster 
+F_2011 <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                   y = imp.vars[,2],
+                                   z = temp[, "New_Den_11.6p.F"]),
+                        crs = crs("+init=epsg:9191"))
+par(mfrow = c(1,4))
+plot(ras250m[[1]]) # original unstressed 
+plot(F_2009) # year 1 fishing stress 
+plot(F_2010.F) # year 2 fishing stress 
+plot(F_2011) # year 3 fishing stress 
+plot(F_2011 - F_2010.F) # new stress locations?
+
+
+# YEAR 3 - SEDIMENTATION ----
+  # (2-6% mud)
+  #  (1 % scenario year 2 )
+df1$Mud.OG <- mud.OG$Mud.OG 
+df1$three.p.mud <- round(df1$Mud.OG * 0.03 + df1$Mud.OG, digits =  2) # + 1%
+df1 <- transform(df1,three.p.mud = ifelse(three.p.mud > 100, 100, three.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+#  ((2 % scenario year 2 )
+df2$Mud.OG <- mud.OG$Mud.OG 
+df2$six.p.mud <- round(df2$Mud.OG * 0.06 + df2$Mud.OG, digits =  2) # + 2%
+df2 <- transform(df2,six.p.mud = ifelse(six.p.mud > 100, 100, six.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+# (3% scenario year 2 )
+df3$Mud.OG <- mud.OG$Mud.OG  
+df3$nine.p.mud <- round(df3$Mud.OG * 0.09 + df3$Mud.OG, digits =  2) # + 3%
+df3 <- transform(df3,nine.p.mud = ifelse(nine.p.mud > 100, 100, nine.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+
+# Lookup across tables (reference to scenario)
+##---ONE PERCENT ANNUAL CHANGE Yr 2---- (ABSOLUTE DIFFERENCE)
+inds <- match(df1$Mud.OG, mud.res.hur$Mud) 
+df1$Abu.inital.3p <- mud.res.hur$hur[inds] 
+inds <- match(df1$three.p.mud , mud.res.hur$Mud) 
+df1$Abu.scen3p <- mud.res.hur$hur[inds] # 
+df1$diff.3p <- df1$Abu.scen3p - df1$Abu.inital.3p # 
+df1$New_Den.yr3.3p.S <- (temp$New_Den_11.2p.F) + (df1$diff.3p) # 
+##---TWO PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df2$Abu.inital.6p <- mud.res.hur$hur[inds] 
+inds <- match(df2$six.p.mud , mud.res.hur$Mud) 
+df2$Abu.scen6p <- mud.res.hur$hur[inds] 
+df2$diff.6p <- df2$Abu.scen6p - df2$Abu.inital.6p  # *
+df2$New_Den.yr3.6p.S <- (temp$New_Den_11.4p.F) + (df2$diff.6p)
+##---THREE PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df3$Abu.inital.9p <- mud.res.hur$hur[inds] 
+inds <- match(df3$nine.p.mud , mud.res.hur$Mud) 
+df3$Abu.scen9p <- mud.res.hur$hur[inds] 
+df3$diff.9p <- df3$Abu.scen9p - df3$Abu.inital.9p  # *
+df3$New_Den.yr3.9p.S <- (temp$New_Den_11.6p.F) + (df3$diff.9p) 
+
+## DOUBLE CHECK IT SPATIALLY
+# Inspect visually / create raster 
+F_2011.FS <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                      y = imp.vars[,2],
+                                      z = df3[, "New_Den.yr3.9p.S"]),
+                           crs = crs("+init=epsg:9191"))
+
+plot(ras250m[[1]]) # original unstressed 
+plot(F_2011.FS - F_2010.F) # where does sedimentation stress occur?
+
+# YR3 COMBINE sedimentation & Fishing effects of the previous year, for year 4 model ----
+# if there are no effects of fishing, use sedimentation values, otherwise, combine the sedimentation difference to the fishing density
+df1 <- transform(df1, New_Den_11.3p.FS = ifelse(temp$Fishing_2011 == 0, New_Den.yr3.3p.S, (temp$New_Den_11.2p.F + df1$diff.3p))) 
+df2 <- transform (df2, New_Den_11.6p.FS = ifelse(temp$Fishing_2011 == 0, New_Den.yr3.6p.S, (temp$New_Den_11.4p.F + df2$diff.6p)))
+df3 <- transform (df3, New_Den_11.9p.FS = ifelse(temp$Fishing_2011 == 0, New_Den.yr3.9p.S, (temp$New_Den_11.6p.F + df3$diff.9p)))
+
+# RECOVERY YR3 (Fishing only --.FSR variable)---- (proportional recovery =  Yr 1 impact/ Yr 2)----
+
+#(A) Calculate the difference in density from fishing impact (T1 - T0)
+df1$fish.diff.11_10.3p <- temp$New_Den_11.2p.F - temp$New_Den_10.2p.FSR
+df2$fish.diff.11_10.6p <- temp$New_Den_11.4p.F - temp$New_Den_10.4p.FSR
+df3$fish.diff.11_10.9p <- temp$New_Den_11.6p.F - temp$New_Den_10.6p.FSR
+# (B) Calculate the difference in fishing impact as a proportion (reduced trawling impact)
+df1$trawl.diff.prop.11_10 <- temp$Fishing_2010 / temp$Fishing_2011
+# tidy -Remove NAs and Infs
+df1$trawl.diff.prop.11_10[is.na(df1$trawl.diff.prop.11_10)] <- 0
+df1$trawl.diff.prop.11_10[is.infinite(df1$trawl.diff.prop.11_10)] <- 0
+# (C) Calculate the proportion of reduced trawling impact of density in trawl difference
+# where values are (-) there is a decrease in fishing, hence recovery potential
+df1$temp.Den.prop.rec.11_10.3p <- (df1$fish.diff.11_10.3p - (df1$fish.diff.11_10.3p * df1$trawl.diff.prop.11_10))/3
+df2$temp.Den.prop.rec.11_10.6p <- (df2$fish.diff.11_10.6p - (df2$fish.diff.11_10.6p * df1$trawl.diff.prop.11_10))/3
+df3$temp.Den.prop.rec.11_10.9p <- (df3$fish.diff.11_10.9p - (df3$fish.diff.11_10.9p * df1$trawl.diff.prop.11_10))/3
+# (D) Add the modified recovery density back to the previous year 
+df1$temp.Den.2011.3p.FR <-  df1$temp.Den.prop.rec.11_10.3p + temp$New_Den_10.2p.F
+df2$temp.Den.2011.6p.FR <-  df2$temp.Den.prop.rec.11_10.6p + temp$New_Den_10.4p.F
+df3$temp.Den.2011.9p.FR <-  df3$temp.Den.prop.rec.11_10.9p + temp$New_Den_10.6p.F
+# (E) Adjust for inflated values by impact                                    
+df1 <- transform(df1, temp.Den.2011.3p.FR = ifelse(temp.Den.2011.3p.FR > temp$New_Den_10.2p.FSR, temp$New_Den_10.2p.FSR, temp.Den.2010.2p.FR))
+df2 <- transform(df2, temp.Den.2011.6p.FR = ifelse(temp.Den.2011.6p.FR > temp$New_Den_10.4p.FSR, temp$New_Den_10.4p.FSR, temp.Den.2010.4p.FR))
+df3 <- transform(df3, temp.Den.2011.9p.FR = ifelse(temp.Den.2011.9p.FR > temp$New_Den_10.6p.FSR, temp$New_Den_10.6p.FSR, temp.Den.2010.6p.FR))
+# (F) Add year 3 recovered fishing density back to thr  combined sediment & fishing 
+temp$New_Den_11.3p.FSR <- (df1$temp.Den.2011.3p.FR - temp$New_Den_11.2p.F)   + df1$New_Den_11.3p.FS
+temp$New_Den_11.6p.FSR <- (df2$temp.Den.2011.6p.FR - temp$New_Den_11.4p.F)   + df2$New_Den_11.6p.FS
+temp$New_Den_11.9p.FSR <- (df3$temp.Den.2011.9p.FR - temp$New_Den_11.6p.F)  + df3$New_Den_11.9p.FS
+#---------------------------###  COMB - YR 4 -----------------------------------------
+
+
+# YEAR 4- FISHING IMPACT----
+
+# Year 4 Fishing impact @1% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1] ,"New_Den_12.3p.F"] <- temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1]
+                                                                                                              ,"New_Den_11.3p.FSR"] * stress.1$abu[i]
+}
+# Year 4 Fishing impact @2% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1] ,"New_Den_12.6p.F"] <- temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1]
+                                                                                                              ,"New_Den_11.6p.FSR"] * stress.1$abu[i]
+}
+# Year 4 Fishing impact @3% mud
+for (i in 1:length(stress.1$units)- 1){ # we add minus 1 to the end so the loop stops at 24 trough to 25, instead of looking for value between 25-26
+  
+  temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1] ,"New_Den_12.9p.F"] <- temp[temp$Fishing_2011 >= stress.1[i, 1] & temp$Fishing_2011 < stress.1[i+1 ,1]
+                                                                                                              ,"New_Den_11.9p.FSR"] * stress.1$abu[i]
+}
+# bring values back to same scale as input
+temp$New_Den_12.3p.F <- temp$New_Den_12.3p.F / 100
+temp$New_Den_12.6p.F <- temp$New_Den_12.6p.F / 100
+temp$New_Den_12.9p.F <- temp$New_Den_12.9p.F  / 100
+
+# Inspect visually / create raster 
+F_2012 <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                   y = imp.vars[,2],
+                                   z = temp[, "New_Den_12.9p.F"]),
+                        crs = crs("+init=epsg:9191"))
+par(mfrow = c(1,4))
+plot(ras250m[[1]]) # original unstressed 
+plot(F_2012)
+plot(F_2011)
+plot(F_2012 - F_2011.FS) # new stress locations?
+
+
+# YEAR 4 - SEDIMENTATION ----
+# (4-12% mud)
+#  (1 % scenario year 4 )
+df1$Mud.OG <- mud.OG$Mud.OG 
+df1$four.p.mud <- round(df1$Mud.OG * 0.04 + df1$Mud.OG, digits =  2) # + 1%
+df1 <- transform(df1,four.p.mud = ifelse(four.p.mud > 100, 100, four.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+#  ((2 % scenario year 4 )
+df2$Mud.OG <- mud.OG$Mud.OG 
+df2$eight.p.mud <- round(df2$Mud.OG * 0.08 + df2$Mud.OG, digits =  2) # + 2%
+df2 <- transform(df2,eight.p.mud = ifelse(eight.p.mud > 100, 100, eight.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+# (3% scenario year 4 )
+df3$Mud.OG <- mud.OG$Mud.OG  
+df3$twelve.p.mud <- round(df3$Mud.OG * 0.012 + df3$Mud.OG, digits =  2) # + 3%
+df3 <- transform(df3,twelve.p.mud = ifelse(twelve.p.mud > 100, 100, twelve.p.mud))  # Cannot exceed 100% mud, so if > 100, make 100
+
+# Lookup across tables (reference to scenario)
+##---ONE PERCENT ANNUAL CHANGE Yr 2---- (ABSOLUTE DIFFERENCE)
+inds <- match(df1$Mud.OG, mud.res.hur$Mud) 
+df1$Abu.inital.4p <- mud.res.hur$hur[inds] 
+inds <- match(df1$three.p.mud , mud.res.hur$Mud) 
+df1$Abu.scen4p <- mud.res.hur$hur[inds] # 
+df1$diff.4p <- df1$Abu.scen3p - df1$Abu.inital.3p # 
+df1$New_Den.yr4.4p.S <- (temp$New_Den_12.3p.F) + (df1$diff.4p) # 
+##---TWO PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df2$Abu.inital.8p <- mud.res.hur$hur[inds] 
+inds <- match(df2$eight.p.mud , mud.res.hur$Mud) 
+df2$Abu.scen8p <- mud.res.hur$hur[inds] 
+df2$diff.8p <- df2$Abu.scen6p - df2$Abu.inital.8p  # *
+df2$New_Den.yr4.8p.S <- (temp$New_Den_12.6p.F) + (df2$diff.8p)
+##---THREE PERCENT ANNUAL CHANGE Yr 2---
+inds <- match(df1$Mud.OG, mud.res.hur$Mud)
+df3$Abu.inital.12p <- mud.res.hur$hur[inds] 
+inds <- match(df3$twelve.p.mud , mud.res.hur$Mud) 
+df3$Abu.scen12p <- mud.res.hur$hur[inds] 
+df3$diff.12p <- df3$Abu.scen12p - df3$Abu.inital.12p  # *
+df3$New_Den.yr4.12p.S <- (temp$New_Den_12.9p.F) + (df3$diff.12p) 
+
+## DOUBLE CHECK IT SPATIALLY
+# Inspect visually / create raster 
+F_2012.FS <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                      y = imp.vars[,2],
+                                      z = df3[, "New_Den.yr4.12p.S"]),
+                           crs = crs("+init=epsg:9191"))
+
+plot(ras250m[[1]]) # original unstressed 
+plot(F_2012.FS)
+plot(F_2012.FS - F_2011) # where does sedimentation stress occur?
+
+# YR4 COMBINE sedimentation & Fishing effects of the previous year, for year 2 model ----
+# if there are no effects of fishing, use sedimentation values, otherwise, combine the sedimentation difference to the fishing density
+df1 <- transform(df1, New_Den_12.4p.FS = ifelse(temp$Fishing_2012 == 0, New_Den.yr4.4p.S, (temp$New_Den_12.3p.F + df1$diff.4p))) 
+df2 <- transform (df2, New_Den_12.8p.FS = ifelse(temp$Fishing_2012 == 0, New_Den.yr4.8p.S, (temp$New_Den_12.6p.F + df2$diff.8p)))
+df3 <- transform (df3, New_Den_12.12p.FS = ifelse(temp$Fishing_2012 == 0, New_Den.yr4.12p.S, (temp$New_Den_12.9p.F + df3$diff.12p)))
+
+# RECOVERY YR4 (Fishing only --.FSR variable)---- (proportional recovery =  Yr 3 impact/ Yr 4)----
+
+#(A) Calculate the difference in density from fishing impact (T1 - T0)
+df1$fish.diff.12_11.4p <- temp$New_Den_12.3p.F - temp$New_Den_11.3p.FSR
+df2$fish.diff.12_11.8p <- temp$New_Den_12.6p.F - temp$New_Den_11.6p.FSR
+df3$fish.diff.12_11.12p <- temp$New_Den_12.9p.F - temp$New_Den_11.9p.FSR
+# (B) Calculate the difference in fishing impact as a proportion (reduced trawling impact)
+df1$trawl.diff.prop.12_11 <- temp$Fishing_2011 / temp$Fishing_2012
+# tidy -Remove NAs and Infs
+df1$trawl.diff.prop.12_11[is.na(df1$trawl.diff.prop.12_11)] <- 0
+df1$trawl.diff.prop.12_11[is.infinite(df1$trawl.diff.prop.12_11)] <- 0
+# (C) Calculate the proportion of reduced trawling impact of density in trawl difference
+# where values are (-) there is a decrease in fishing, hence recovery potential
+df1$temp.Den.prop.rec.12_11.4p <- (df1$fish.diff.12_11.4p - (df1$fish.diff.12_11.4p * df1$trawl.diff.prop.12_11))/3
+df2$temp.Den.prop.rec.12_11.8p <- (df2$fish.diff.12_11.8p - (df2$fish.diff.12_11.8p * df1$trawl.diff.prop.12_11))/3
+df3$temp.Den.prop.rec.12_11.12p <- (df3$fish.diff.12_11.12p - (df3$fish.diff.12_11.12p * df1$trawl.diff.prop.12_11))/3
+# (D) Add the modified recovery density back to the previous year 
+df1$temp.Den.2012.4p.FR <-  df1$temp.Den.prop.rec.12_11.4p + temp$New_Den_11.3p.F
+df2$temp.Den.2012.8p.FR <-  df2$temp.Den.prop.rec.12_11.8p + temp$New_Den_11.6p.F
+df3$temp.Den.2012.12p.FR <-  df3$temp.Den.prop.rec.12_11.12p + temp$New_Den_11.9p.F
+# (E) Adjust for inflated values by impact 
+df1 <- transform(df1, temp.Den.2012.4p.FR = ifelse(temp.Den.2012.4p.FR > temp$New_Den_11.3p.FSR, temp$New_Den_11.3p.FSR, temp.Den.2012.4p.FR))
+df2 <- transform(df2, temp.Den.2012.8p.FR = ifelse(temp.Den.2012.8p.FR > temp$New_Den_11.6p.FSR, temp$New_Den_11.6p.FSR, temp.Den.2012.8p.FR))
+df3 <- transform(df3, temp.Den.2012.12p.FR = ifelse(temp.Den.2012.12p.FR > temp$New_Den_11.9p.FSR, temp$New_Den_11.9p.FSR, temp.Den.2012.12p.FR))
+
+# (F) Add year 3 recovered density back to the combined sediment & fishing  
+temp$New_Den_12.4p.FSR <- (df1$temp.Den.2012.4p.FR  - temp$New_Den_12.3p.F)  + df1$New_Den_12.4p.FS
+temp$New_Den_12.8p.FSR <- (df2$temp.Den.2012.8p.FR - temp$New_Den_12.6p.F)  + df2$New_Den_12.8p.FS
+temp$New_Den_12.12p.FSR <- (df3$temp.Den.2012.12p.FR - temp$New_Den_12.9p.F) + df3$New_Den_12.12p.FS
+                                  
+#Evaluate Spatially
+# Inspect visually / create raster 
+F_2012.F <- rasterFromXYZ(data.frame(x = imp.vars[,1],
+                                   y = imp.vars[,2],
+                                   z = temp[, "New_Den_12.12p.FSR"]),
+                        crs = crs("+init=epsg:9191"))
+par(mfrow = c(1,4))
+plot(ras250m[[1]]) # original unstressed 
+plot(F_2012)
+plot(F_2012.F)
+plot(F_2012.F - F_2011) # new stress locations?
+
+# CREATE OUTPUTS
+# ORIGONAL
+CAL.SDM <- rasterFromXYZ(data.frame(x = df1[,"X"],
+                                    y = df1[,"Y"],
+                                    z = imp.vars[, "Den.OG"]),
+                         crs = crs("+init=epsg:9191"))
+
+plot(CAL.SDM)
+# YEAR 1 Rasters 
+# Year 1 - 1% 
+CAL_Fsh_Sed_yr1.1p <- rasterFromXYZ(data.frame(x = df1[,"X" ],
+                                               y = df1[,"Y"],
+                                               z = temp[, "New_Den_09.1p.FS"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr1.1p)
+names(CAL_Fsh_Sed_yr1.1p) <- c("CAL_Fsh_Sed_yr1.1p")
+# Year 1 - 2% (
+CAL_Fsh_Sed_yr1.2p <- rasterFromXYZ(data.frame(x = df2[,"X" ],
+                                               y = df2[,"Y"],
+                                               z = temp[, "New_Den_09.2p.FS"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr1.2p)
+names(CAL_Fsh_Sed_yr1.2p) <- c("CAL_Fsh_Sed_yr1.2p")
+# Year 1 - 3% 
+CAL_Fsh_Sed_yr1.3p <- rasterFromXYZ(data.frame(x = df3[,"X" ],
+                                               y = df3[,"Y"],
+                                               z = temp[, "New_Den_09.3p.FS"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr1.3p)
+names(CAL_Fsh_Sed_yr1.3p) <- c("CAL_Fsh_Sed_yr1.3p")
+# YEAR 2 Rasters 
+# Year 2 - 1% 
+CAL_Fsh_Sed_yr2.2p <- rasterFromXYZ(data.frame(x = df1[,"X" ],
+                                               y = df1[,"Y"],
+                                               z = temp[, "New_Den_10.2p.FSR"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr2.2p)
+names(CAL_Fsh_Sed_yr2.2p) <- c("CAL_Fsh_Sed_yr2.2p")
+# Year 2 - 2% 
+CAL_Fsh_Sed_yr2.4p <- rasterFromXYZ(data.frame(x = df2[,"X" ],
+                                               y = df2[,"Y"],
+                                               z = temp[, "New_Den_10.4p.FSR"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr2.4p)
+names(CAL_Fsh_Sed_yr2.4p) <- c("CAL_Fsh_Sed_yr2.4p")
+# Year 2 - 3% 
+CAL_Fsh_Sed_yr2.6p <- rasterFromXYZ(data.frame(x = df3[,"X" ],
+                                               y = df3[,"Y"],
+                                               z = temp[, "New_Den_10.6p.FSR"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr2.6p)
+names(CAL_Fsh_Sed_yr2.6p) <- c("CAL_Fsh_Sed_yr2.6p")
+
+# YEAR 3 Rasters 
+# Year 3 - 1% 
+CAL_Fsh_Sed_yr3.3p <- rasterFromXYZ(data.frame(x = df1[,"X" ],
+                                               y = df1[,"Y"],
+                                               z = temp[, "New_Den_11.3p.FSR"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr3.3p)
+names(CAL_Fsh_Sed_yr3.3p) <- c("CAL_Fsh_Sed_yr3.3p")
+# Year 3 - 2% 
+CAL_Fsh_Sed_yr3.6p <- rasterFromXYZ(data.frame(x = df2[,"X" ],
+                                               y = df2[,"Y"],
+                                               z = temp[, "New_Den_11.6p.FSR"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr3.6p)
+names(CAL_Fsh_Sed_yr3.6p) <- c("CAL_Fsh_Sed_yr3.6p")
+# Year 3 - 3% 
+CAL_Fsh_Sed_yr3.9p <- rasterFromXYZ(data.frame(x = df3[,"X" ],
+                                               y = df3[,"Y"],
+                                               z = temp[, "New_Den_11.9p.FSR"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr3.9p)
+names(CAL_Fsh_Sed_yr3.9p) <- c("CAL_Fsh_Sed_yr3.9p")
+# YEAR 4 Rasters 
+# Year 4 - 1% 
+CAL_Fsh_Sed_yr4.4p <- rasterFromXYZ(data.frame(x = df1[,"X" ],
+                                               y = df1[,"Y"],
+                                               z = temp[, "New_Den_12.4p.FSR"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr4.4p)
+names(CAL_Fsh_Sed_yr4.4p) <- c("CAL_Fsh_Sed_yr4.4p")
+# Year 4 - 2% 
+CAL_Fsh_Sed_yr4.8p <- rasterFromXYZ(data.frame(x = df2[,"X" ],
+                                               y = df2[,"Y"],
+                                               z = temp[, "New_Den_12.8p.FSR"]),
+                                    crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr4.8p)
+names(CAL_Fsh_Sed_yr4.8p ) <- c("CAL_Fsh_Sed_yr4.8p ")
+# Year 4 - 3% 
+CAL_Fsh_Sed_yr4.12p <- rasterFromXYZ(data.frame(x = df3[,"X" ],
+                                                y = df3[,"Y"],
+                                                z = temp[, "New_Den_12.12p.FSR"]),
+                                     crs = crs("+init=epsg:9191"))
+plot(CAL_Fsh_Sed_yr4.12p)
+plot(CAL_Fsh_Sed_yr4.12p - ras250m[[1]])
+names(CAL_Fsh_Sed_yr4.12p) <- c("CAL_Fsh_Sed_yr4.12p")
+
+# SAVE OUTPUTS----
+# Test comparison between order of operations
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V3")
+Rec_Aft <- CAL_Fsh_Sed_yr4.12p - ras250m[[1]] # recovery applied before sedimentation
+writeRaster(Rec_Aft, filename = "CAL_Fsh_Sed_Rec_Aft.tif", overwrite=T, progress = "window")
+
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V3")
+
+f250m <- list.files(getwd())
+ras250m <- lapply(f250m, raster)
+plot(ras250m[[1]]) # check through 
+
+Rec_Bef <- ras250m[[1]]
+
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V3")
+writeRaster(final_diff, filename = "Final_diff_Rec_Aft_minus_Rec_Bef.tif", overwrite=T, progress = "window")
+
+final_diff <- Rec_Aft - Rec_Bef
+plot(final_diff)
+
+final_diff2 <-  Rec_Bef - Rec_Aft 
+plot(final_diff2)
+
+
+
+# FISHING AND SEDIMENT 
+# SAVE ALL OUTPUTS
+# 1% change 
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr1.1p, filename = "CAL_Fsh_Sed_yr1.1p.FR.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr2.2p, filename = "CAL_Fsh_Sed_yr2.2p.FR.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr3.3p, filename = "CAL_Fsh_Sed_yr3.3p.FR.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr4.4p, filename = "CAL_Fsh_Sed_yr4.4p.FR.tif", overwrite=T, progress = "window")
+# 2% change 
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr1.2p, filename = "CAL_Fsh_Sed_yr1.2p.FR.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr2.4p, filename = "CAL_Fsh_Sed_yr2.4p.FR.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr3.6p, filename = "CAL_Fsh_Sed_yr3.6p.FR.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr4.8p, filename = "CAL_Fsh_Sed_yr4.8p.FR.tif", overwrite=T, progress = "window")
+# 3 % change 
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr1.3p, filename = "CAL_Fsh_Sed_yr1.3p.FR.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr2.6p, filename = "CAL_Fsh_Sed_yr2.6p.FR.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr3.9p, filename = "CAL_Fsh_Sed_yr3.9p.FR.tif", overwrite=T, progress = "window")
+setwd("C:/Users/Stephs Magic Box/Desktop/R/PhD/Chap3/R_working/CAL/Stress_scenarios/V2/FR")
+writeRaster(CAL_Fsh_Sed_yr4.12p, filename = "CAL_Fsh_Sed_yr4.12p.FR.tif", overwrite=T, progress = "window")
+
+ras250m2 <- list( c("CAL_Fsh_Sed_yr1.1p.FR","CAL_Fsh_Sed_yr1.2p.FR",  "CAL_Fsh_Sed_yr1.3p.FR" , "CAL_Fsh_Sed_yr2.2p.FR", 
+"CAL_Fsh_Sed_yr2.4p.FR",  "CAL_Fsh_Sed_yr2.6p.FR" , "CAL_Fsh_Sed_yr3.3p.FR" , "CAL_Fsh_Sed_yr3.6p.FR", 
+"CAL_Fsh_Sed_yr3.9p.FR" , "CAL_Fsh_Sed_yr4.12p.FR", "CAL_Fsh_Sed_yr4.4p.FR" , "CAL_Fsh_Sed_yr4.8p.FR" ))
+
+
+
+
+
